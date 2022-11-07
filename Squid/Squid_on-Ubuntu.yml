@@ -1,0 +1,221 @@
+Description:  This template deploy a ec2 instance with the Squid Proxy application in the specified VPC and subnet.
+
+Mappings:
+  RegionMap:
+    us-east-1: #North Virginia
+      Squid: ami-08d4ac5b634553e16
+    us-east-2: #Ohio
+      Squid: ami-0960ab670c8bb45f3
+    us-west-1: #North California
+      Squid: ami-01154c8b2e9a14885
+    us-west-2: #Oregon
+      Squid: ami-0ddf424f81ddb0720
+    eu-central-1: #Frankfurt
+      Squid: ami-0c9354388bb36c088
+    eu-west-1: #Ireland
+      Squid: ami-068f9e5c614ab2dd2
+    eu-west-2: #London
+      Squid: ami-0bd2099338bc55e6d
+    eu-west-3: #Paris
+      Squid: ami-0b9fc80d55a674896
+    eu-north-1: #Stockholm
+      Squid: ami-012ae45a4a2d92750
+    sa-east-1: #Sao Paulo
+      Squid: ami-08ae71fd7f1449df1
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: Proxy-environment-x
+
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: Please enter the VPC ID that will be deployed the proxy
+
+  Subnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: Please enter the SubnetId
+    
+  KeyPair:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Please enter the valid Key Pair for your region
+
+Resources:
+#Creating the Security Group for Allowing SSH from anyone (public and private IPs) and TCP/3128 from the private subnets
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub Squid-${EnvironmentName}
+      GroupDescription: "Security group allowing all private subnets to inbound traffic to TCP/3128 and all to SSH"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 3128
+        ToPort: 3128
+        CidrIp: 10.0.0.0/8
+      - IpProtocol: tcp
+        FromPort: 3128
+        ToPort: 3128
+        CidrIp: 172.16.0.0/12
+      - IpProtocol: tcp
+        FromPort: 3128
+        ToPort: 3128
+        CidrIp: 192.168.0.0/16
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+
+#EC2 Role to be assumed and use to create the EC2 resources.
+  EC2Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub "EC2Role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+
+#Instance profile
+  EC2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2Role
+
+#Creating the ec2 instance that will the Squid Proxy
+  Squid: 
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId:
+        Fn::FindInMap:
+          - RegionMap
+          - Ref: AWS::Region
+          - Squid
+      InstanceType: t3.medium
+      KeyName: !Ref KeyPair
+      Tags:
+      - Key: Name
+        Value: Squid
+      SubnetId: !Ref Subnet
+      SecurityGroupIds:
+        - Ref: SecurityGroup
+      BlockDeviceMappings: 
+      - DeviceName: /dev/sdm
+        Ebs: 
+          DeleteOnTermination: true
+          VolumeSize: 20
+      UserData:
+        !Base64 |
+          #!/bin/bash
+
+          apt update
+          sleep 30
+
+          apt install squid -y
+
+          sleep 30
+
+          echo '
+          #Default:
+          # Adapt to list your (internal) IP networks from where browsing
+          # should be allowed
+          acl localnet src 0.0.0.1-0.255.255.255	# RFC 1122 "this" network (LAN)
+          acl localnet src 10.0.0.0/8		# RFC 1918 local private network (LAN)
+          acl localnet src 100.64.0.0/10		# RFC 6598 shared address space (CGN)
+          acl localnet src 169.254.0.0/16 	# RFC 3927 link-local (directly plugged) machines
+          acl localnet src 172.16.0.0/12		# RFC 1918 local private network (LAN)
+          acl localnet src 192.168.0.0/16		# RFC 1918 local private network (LAN)
+          acl localnet src fc00::/7       	# RFC 4193 local private network range
+          acl localnet src fe80::/10      	# RFC 4291 link-local (directly plugged) machines
+
+          acl SSL_ports port 443
+          acl Safe_ports port 80		# http
+          acl Safe_ports port 21		# ftp
+          acl Safe_ports port 443		# https
+          acl Safe_ports port 70		# gopher
+          acl Safe_ports port 210		# wais
+          acl Safe_ports port 1025-65535	# unregistered ports
+          acl Safe_ports port 280		# http-mgmt
+          acl Safe_ports port 488		# gss-http
+          acl Safe_ports port 591		# filemaker
+          acl Safe_ports port 777		# multiling http
+          acl CONNECT method CONNECT
+
+          # Deny requests to certain unsafe ports
+          http_access deny !Safe_ports
+
+          # Deny CONNECT to other than secure SSL ports
+          http_access deny CONNECT !SSL_ports
+
+          # Only allow cachemgr access from localhost
+          http_access allow localhost manager
+          http_access deny manager
+
+          #
+          # INSERT YOUR OWN RULE(S) HERE TO ALLOW ACCESS FROM YOUR CLIENTS
+          #
+          include /etc/squid/conf.d/*
+
+          # Example rule allowing access from your local networks.
+          # Adapt localnet in the ACL section to list your (internal) IP networks
+          # from where browsing should be allowed
+          #http_access allow localnet
+          http_access allow localhost
+
+          #
+          # ACL whitelist, so only the domains listed here will be allowed
+          #
+          acl whitelist dstdomain .trendmicro.com .sap.com
+          http_access allow whitelist
+
+          # And finally deny all other access to this proxy
+          http_access deny all
+
+          # Squid normally listens to port 3128
+          http_port 0.0.0.0:3128
+
+          # Leave coredumps in the first cache dir
+          coredump_dir /var/spool/squid
+
+          #
+          # Add any of your own refresh_pattern entries above these.
+          #
+          refresh_pattern ^ftp:		1440	20%	10080
+          refresh_pattern ^gopher:	1440	0%	1440
+          refresh_pattern -i (/cgi-bin/|\?) 0	0%	0
+          refresh_pattern \/(Packages|Sources)(|\.bz2|\.gz|\.xz)$ 0 0% 0 refresh-ims
+          refresh_pattern \/Release(|\.gpg)$ 0 0% 0 refresh-ims
+          refresh_pattern \/InRelease$ 0 0% 0 refresh-ims
+          refresh_pattern \/(Translation-.*)(|\.bz2|\.gz|\.xz)$ 0 0% 0 refresh-ims
+          # example pattern for deb packages
+          #refresh_pattern (\.deb|\.udeb)$   129600 100% 129600
+          refresh_pattern .		0	20%	4320
+
+
+          ' > /etc/squid/squid.conf
+
+          squid -k reconfigure
+
+#Outputs to be presented in the CloudFormation Stack
+
+Outputs:
+  SquidPrivateDNSName:
+    Description: Export the Squid instance Private DNS Name
+    Value: !GetAtt Squid.PrivateDnsName
+
+  SquidPublicDNSName:
+    Description: Export the Squid instance Public DNS Name
+    Value: !GetAtt Squid.PublicDnsName
