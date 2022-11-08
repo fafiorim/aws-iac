@@ -57,7 +57,7 @@ http_access allow localhost
 #
 # ACL whitelist, so only the domains listed here will be allowed
 #
-acl whitelist dstdomain .trendmicro.com .sap.com
+acl whitelist dstdomain .trendmicro.com .google.com
 http_access allow whitelist
 
 # And finally deny all other access to this proxy
